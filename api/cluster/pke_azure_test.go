@@ -54,7 +54,7 @@ var (
 		CIDR: "1.1.1.1/10",
 	}
 	cri = CRI{
-		Runtime:       "",
+		Runtime:       "containerd",
 		RuntimeConfig: nil,
 	}
 	network = Network{
@@ -63,8 +63,17 @@ var (
 		ProviderConfig: nil,
 		ServiceCIDR:    "11.11.1.1/16",
 	}
-	Version = "12.2.2"
-	RBAC    = false
+	Version      = "12.2.2"
+	RBAC         = false
+	scaleOptions = ScaleOptions{
+		Enabled:             false,
+		DesiredCPU:          0,
+		DesiredMEM:          0,
+		DesiredGPU:          0,
+		OnDemandPCT:         0,
+		Excludes:            nil,
+		KeepDesiredCapacity: false,
+	}
 )
 
 func TestToAzurePKEClusterCreationParams(t *testing.T) {
@@ -92,10 +101,10 @@ func TestToAzurePKEClusterCreationParams(t *testing.T) {
 					SSHSecretID: SSHSecretID,
 					ScaleOptions: ScaleOptions{
 						Enabled:             false,
-						DesiredCPU:          0,
-						DesiredMEM:          0,
+						DesiredCPU:          2,
+						DesiredMEM:          2048,
 						DesiredGPU:          0,
-						OnDemandPCT:         0,
+						OnDemandPCT:         55,
 						Excludes:            nil,
 						KeepDesiredCapacity: false,
 					},
@@ -154,9 +163,17 @@ func TestToAzurePKEClusterCreationParams(t *testing.T) {
 				},
 				OrganizationID: orgID,
 				ResourceGroup:  ResourceGroup,
-				ScaleOptions:   cluster.ScaleOptions{},
-				SecretID:       SecretID,
-				SSHSecretID:    SSHSecretID,
+				ScaleOptions: cluster.ScaleOptions{
+					Enabled:             scaleOptions.Enabled,
+					DesiredCpu:          scaleOptions.DesiredCPU,
+					DesiredMem:          scaleOptions.DesiredMEM,
+					DesiredGpu:          scaleOptions.DesiredGPU,
+					OnDemandPct:         scaleOptions.OnDemandPCT,
+					Excludes:            nil,
+					KeepDesiredCapacity: false,
+				},
+				SecretID:    SecretID,
+				SSHSecretID: SSHSecretID,
 			},
 		},
 	}
