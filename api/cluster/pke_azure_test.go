@@ -23,60 +23,63 @@ import (
 	"gotest.tools/assert"
 )
 
-var orgID uint = 1
-var userID uint = 1
+const (
+	orgID  = 1
+	userID = 1
 
-var (
 	Name          = "test"
 	SecretID      = "test-secret"
 	SSHSecretID   = "ssh-secret"
 	Location      = "test-location"
 	ResourceGroup = "test-resource-group"
 	Instancetype  = "azure-instance"
-	Nodepool      = NodePool{
-		Labels:       nil,
-		Name:         "nodepool1",
-		Roles:        []string{"role"},
-		Subnet:       Azuresubnet,
-		Zones:        []string{"zone"},
-		InstanceType: Instancetype,
-		Autoscaling:  false,
-		Count:        2,
-		Min:          1,
-		Max:          3,
-	}
-	Azuresubnet = AzureSubnet{
-		Name: "test-subnet",
-		CIDR: "1.1.1.1/16",
-	}
-	Azurenetwork = AzureNetwork{
-		Name: "test-net",
-		CIDR: "1.1.1.1/10",
-	}
-	cri = CRI{
-		Runtime:       "containerd",
-		RuntimeConfig: nil,
-	}
-	network = Network{
-		PodCIDR:        "192.168.1.1/16",
-		Provider:       "weave",
-		ProviderConfig: nil,
-		ServiceCIDR:    "11.11.1.1/16",
-	}
-	Version      = "12.2.2"
-	RBAC         = false
-	scaleOptions = ScaleOptions{
-		Enabled:             false,
-		DesiredCPU:          0,
-		DesiredMEM:          0,
-		DesiredGPU:          0,
-		OnDemandPCT:         0,
-		Excludes:            nil,
-		KeepDesiredCapacity: false,
-	}
+	Version       = "12.2.2"
+	RBAC          = false
 )
 
 func TestToAzurePKEClusterCreationParams(t *testing.T) {
+	var (
+		Azuresubnet = AzureSubnet{
+			Name: "test-subnet",
+			CIDR: "1.1.1.1/16",
+		}
+		Nodepool = NodePool{
+			Labels:       nil,
+			Name:         "nodepool1",
+			Roles:        []string{"role"},
+			Subnet:       Azuresubnet,
+			Zones:        []string{"zone"},
+			InstanceType: Instancetype,
+			Autoscaling:  false,
+			Count:        2,
+			Min:          1,
+			Max:          3,
+		}
+		Azurenetwork = AzureNetwork{
+			Name: "test-net",
+			CIDR: "1.1.1.1/10",
+		}
+		cri = CRI{
+			Runtime:       "containerd",
+			RuntimeConfig: nil,
+		}
+		network = Network{
+			PodCIDR:        "192.168.1.1/16",
+			Provider:       "weave",
+			ProviderConfig: nil,
+			ServiceCIDR:    "11.11.1.1/16",
+		}
+		scaleOptions = ScaleOptions{
+			Enabled:             false,
+			DesiredCPU:          0,
+			DesiredMEM:          0,
+			DesiredGPU:          0,
+			OnDemandPCT:         0,
+			Excludes:            nil,
+			KeepDesiredCapacity: false,
+		}
+	)
+
 	var conversionTest = []struct {
 		Name string
 		in   CreatePKEOnAzureClusterRequest
