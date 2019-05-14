@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/banzaicloud/pipeline/internal/providers/azure/pke/driver"
+
 	"github.com/gin-gonic/gin"
 	"github.com/goph/emperror"
 	"github.com/pkg/errors"
@@ -53,8 +55,18 @@ type ClusterAPI struct {
 	externalBaseURL string
 	workflowClient  client.Client
 
-	logger       logrus.FieldLogger
-	errorHandler emperror.Handler
+	logger          logrus.FieldLogger
+	errorHandler    emperror.Handler
+	clusterCreators ClusterCreators
+	clusterDeleters ClusterDeleters
+}
+
+type ClusterCreators struct {
+	PKEOnAzure driver.AzurePKEClusterCreator
+}
+
+type ClusterDeleters struct {
+	PKEOnAzure driver.AzurePKEClusterDeleter
 }
 
 // NewClusterAPI returns a new ClusterAPI instance.
@@ -65,6 +77,8 @@ func NewClusterAPI(
 	logger logrus.FieldLogger,
 	errorHandler emperror.Handler,
 	externalBaseURL string,
+	clusterCreators ClusterCreators,
+	clusterDeleters ClusterDeleters,
 
 ) *ClusterAPI {
 	return &ClusterAPI{
@@ -73,8 +87,10 @@ func NewClusterAPI(
 		workflowClient:  workflowClient,
 		externalBaseURL: externalBaseURL,
 
-		logger:       logger,
-		errorHandler: errorHandler,
+		logger:          logger,
+		errorHandler:    errorHandler,
+		clusterCreators: clusterCreators,
+		clusterDeleters: clusterDeleters,
 	}
 }
 

@@ -19,13 +19,18 @@ uipath = "http://localhost:4200/ui"
 signupRedirectPath = "http://localhost:4200/ui"
 
 [database]
+# dialect = "postgres"
 dialect = "mysql"
 host = "localhost"
+# port = 5432
 port = 3306
+# tls  = "disable"
+tls  = "false"
 user = "sparky"
 role = ""
 password = "sparky123"
 dbname = "pipeline"
+cicddbname = "cicd"
 
 # Turn this to true to see all queries in the log
 logging = false
@@ -160,11 +165,11 @@ sleepSecondsForNodepoolActive = 30
 
 [ark]
 name = "ark"
-namespace = "pipeline-infra"
+namespace = "pipeline-system"
 chart = "banzaicloud-stable/ark"
-chartVersion = "1.2.1"
+chartVersion = "1.2.2"
 image = "banzaicloud/ark"
-imageTag = "v0.9.6"
+imageTag = "v0.9.11"
 pullPolicy = "IfNotPresent"
 syncEnabled = true
 logLevel = "info"

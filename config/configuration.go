@@ -209,9 +209,11 @@ func init() {
 	viper.SetDefault("database.dialect", "mysql")
 	viper.SetDefault("database.port", 3306)
 	viper.SetDefault("database.host", "localhost")
+	viper.SetDefault("database.tls", "")
 	viper.SetDefault("database.user", "kellyslater")
 	viper.SetDefault("database.password", "pipemaster123!")
-	viper.SetDefault("database.dbname", "pipelinedb")
+	viper.SetDefault("database.dbname", "pipeline")
+	viper.SetDefault("database.cicddbname", "cicd")
 	viper.SetDefault("database.logging", false)
 	viper.SetDefault(DBAutoMigrateEnabled, false)
 	viper.SetDefault("audit.enabled", true)
@@ -232,11 +234,11 @@ func init() {
 	viper.SetDefault(OKESleepSecondsForNodepoolActive, 30)
 
 	viper.SetDefault(ARKName, "ark")
-	viper.SetDefault(ARKNamespace, "pipeline-infra")
+	viper.SetDefault(ARKNamespace, "pipeline-system")
 	viper.SetDefault(ARKChart, "banzaicloud-stable/ark")
-	viper.SetDefault(ARKChartVersion, "1.2.1")
+	viper.SetDefault(ARKChartVersion, "1.2.2")
 	viper.SetDefault(ARKImage, "banzaicloud/ark")
-	viper.SetDefault(ARKImageTag, "v0.9.6")
+	viper.SetDefault(ARKImageTag, "v0.9.11")
 	viper.SetDefault(ARKPullPolicy, "IfNotPresent")
 	viper.SetDefault(ARKSyncEnabled, true)
 	viper.SetDefault(ARKLogLevel, "info")
@@ -356,11 +358,7 @@ func GetCORS() cors.Config {
 // GetStateStorePath returns the state store path
 func GetStateStorePath(clusterName string) string {
 	stateStorePath := viper.GetString("statestore.path")
-	if len(clusterName) == 0 {
-		return stateStorePath
-	}
-
-	return fmt.Sprintf("%s/%s", stateStorePath, clusterName)
+	return filepath.Join(stateStorePath, clusterName)
 }
 
 // GetHelmPath returns local helm path

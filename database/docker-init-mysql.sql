@@ -1,0 +1,2 @@
+CREATE DATABASE IF NOT EXISTS cicd;
+GRANT ALL PRIVILEGES ON cicd.* TO 'sparky'@'%';

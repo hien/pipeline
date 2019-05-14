@@ -38,13 +38,18 @@ import (
 	intClusterAuth "github.com/banzaicloud/pipeline/internal/cluster/auth"
 	"github.com/banzaicloud/pipeline/internal/cluster/clustersecret"
 	"github.com/banzaicloud/pipeline/internal/cluster/clustersecret/clustersecretadapter"
+	intClusterDNS "github.com/banzaicloud/pipeline/internal/cluster/dns"
+	intClusterK8s "github.com/banzaicloud/pipeline/internal/cluster/kubernetes"
+	intClusterWorkflow "github.com/banzaicloud/pipeline/internal/cluster/workflow"
 	"github.com/banzaicloud/pipeline/internal/platform/buildinfo"
 	"github.com/banzaicloud/pipeline/internal/platform/cadence"
 	"github.com/banzaicloud/pipeline/internal/platform/database"
 	"github.com/banzaicloud/pipeline/internal/platform/errorhandler"
 	"github.com/banzaicloud/pipeline/internal/platform/log"
+	azurePKEAdapter "github.com/banzaicloud/pipeline/internal/providers/azure/pke/adapter"
 	"github.com/banzaicloud/pipeline/internal/providers/pke/pkeworkflow"
 	"github.com/banzaicloud/pipeline/internal/providers/pke/pkeworkflow/pkeworkflowadapter"
+	intSecret "github.com/banzaicloud/pipeline/internal/secret"
 	"github.com/banzaicloud/pipeline/secret"
 )
 
@@ -113,10 +118,6 @@ func main() {
 		worker, err := cadence.NewWorker(config.Cadence, taskList, zaplog.New(logur.WithFields(logger, map[string]interface{}{"component": "cadence-worker"})))
 		emperror.Panic(err)
 
-		workflow.RegisterWithOptions(pkeworkflow.CreateClusterWorkflow, workflow.RegisterOptions{Name: pkeworkflow.CreateClusterWorkflowName})
-		workflow.RegisterWithOptions(pkeworkflow.DeleteClusterWorkflow, workflow.RegisterOptions{Name: pkeworkflow.DeleteClusterWorkflowName})
-		workflow.RegisterWithOptions(pkeworkflow.UpdateClusterWorkflow, workflow.RegisterOptions{Name: pkeworkflow.UpdateClusterWorkflowName})
-
 		db, err := database.Connect(config.Database)
 		if err != nil {
 			emperror.Panic(err)
@@ -139,6 +140,7 @@ func main() {
 		auth.InitTokenStore()
 
 		clusters := pkeworkflowadapter.NewClusterManagerAdapter(clusterManager)
+		secretStore := pkeworkflowadapter.NewSecretStore(secret.Store)
 
 		clusterSecretStore := clustersecret.NewStore(
 			clustersecretadapter.NewClusterManagerAdapter(clusterManager),
@@ -148,28 +150,16 @@ func main() {
 		clusterAuthService, err := intClusterAuth.NewDexClusterAuthService(clusterSecretStore)
 		emperror.Panic(errors.Wrap(err, "failed to create DexClusterAuthService"))
 
+		// Register amazon specific workflows and activities
+		registerAwsWorkflows(clusters, tokenGenerator)
+
+		azurePKEClusterStore := azurePKEAdapter.NewGORMAzurePKEClusterStore(db)
+
+		// Register azure specific workflows
+		registerAzureWorkflows(secretStore, tokenGenerator, azurePKEClusterStore)
+
 		generateCertificatesActivity := pkeworkflow.NewGenerateCertificatesActivity(clusterSecretStore)
 		activity.RegisterWithOptions(generateCertificatesActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.GenerateCertificatesActivityName})
-
-		awsClientFactory := pkeworkflow.NewAWSClientFactory(pkeworkflowadapter.NewSecretStore(secret.Store))
-
-		createAWSRolesActivity := pkeworkflow.NewCreateAWSRolesActivity(awsClientFactory)
-		activity.RegisterWithOptions(createAWSRolesActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.CreateAWSRolesActivityName})
-
-		waitCFCompletionActivity := pkeworkflow.NewWaitCFCompletionActivity(awsClientFactory)
-		activity.RegisterWithOptions(waitCFCompletionActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.WaitCFCompletionActivityName})
-
-		createPKEVPCActivity := pkeworkflow.NewCreateVPCActivity(awsClientFactory)
-		activity.RegisterWithOptions(createPKEVPCActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.CreateVPCActivityName})
-
-		updateClusterStatusActivitiy := pkeworkflow.NewUpdateClusterStatusActivity(clusters)
-		activity.RegisterWithOptions(updateClusterStatusActivitiy.Execute, activity.RegisterOptions{Name: pkeworkflow.UpdateClusterStatusActivityName})
-
-		updateClusterNetworkActivitiy := pkeworkflow.NewUpdateClusterNetworkActivity(clusters)
-		activity.RegisterWithOptions(updateClusterNetworkActivitiy.Execute, activity.RegisterOptions{Name: pkeworkflow.UpdateClusterNetworkActivityName})
-
-		createElasticIPActivity := pkeworkflow.NewCreateElasticIPActivity(awsClientFactory)
-		activity.RegisterWithOptions(createElasticIPActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.CreateElasticIPActivityName})
 
 		createDexClientActivity := pkeworkflow.NewCreateDexClientActivity(clusters, clusterAuthService)
 		activity.RegisterWithOptions(createDexClientActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.CreateDexClientActivityName})
@@ -177,35 +167,8 @@ func main() {
 		deleteDexClientActivity := pkeworkflow.NewDeleteDexClientActivity(clusters, clusterAuthService)
 		activity.RegisterWithOptions(deleteDexClientActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.DeleteDexClientActivityName})
 
-		createMasterActivity := pkeworkflow.NewCreateMasterActivity(clusters, tokenGenerator)
-		activity.RegisterWithOptions(createMasterActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.CreateMasterActivityName})
-
 		setMasterTaintActivity := pkeworkflow.NewSetMasterTaintActivity(clusters)
 		activity.RegisterWithOptions(setMasterTaintActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.SetMasterTaintActivityName})
-
-		listNodePoolsActivity := pkeworkflow.NewListNodePoolsActivity(clusters)
-		activity.RegisterWithOptions(listNodePoolsActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.ListNodePoolsActivityName})
-
-		createWorkerPoolActivity := pkeworkflow.NewCreateWorkerPoolActivity(clusters, tokenGenerator)
-		activity.RegisterWithOptions(createWorkerPoolActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.CreateWorkerPoolActivityName})
-
-		deletePoolActivity := pkeworkflow.NewDeletePoolActivity(clusters)
-		activity.RegisterWithOptions(deletePoolActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.DeletePoolActivityName})
-
-		updatePoolActivity := pkeworkflow.NewUpdatePoolActivity(awsClientFactory)
-		activity.RegisterWithOptions(updatePoolActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.UpdatePoolActivityName})
-
-		deleteElasticIPActivity := pkeworkflow.NewDeleteElasticIPActivity(clusters)
-		activity.RegisterWithOptions(deleteElasticIPActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.DeleteElasticIPActivityName})
-
-		deleteVPCActivity := pkeworkflow.NewDeleteVPCActivity(clusters)
-		activity.RegisterWithOptions(deleteVPCActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.DeleteVPCActivityName})
-
-		uploadSshKeyPairActivity := pkeworkflow.NewUploadSSHKeyPairActivity(clusters)
-		activity.RegisterWithOptions(uploadSshKeyPairActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.UploadSSHKeyPairActivityName})
-
-		deleteSshKeyPairActivity := pkeworkflow.NewDeleteSSHKeyPairActivity(clusters)
-		activity.RegisterWithOptions(deleteSshKeyPairActivity.Execute, activity.RegisterOptions{Name: pkeworkflow.DeleteSSHKeyPairActivityName})
 
 		workflow.RegisterWithOptions(cluster.RunPostHooksWorkflow, workflow.RegisterOptions{Name: cluster.RunPostHooksWorkflowName})
 
@@ -214,6 +177,31 @@ func main() {
 
 		updateClusterStatusActivity := cluster.NewUpdateClusterStatusActivity(clusterManager)
 		activity.RegisterWithOptions(updateClusterStatusActivity.Execute, activity.RegisterOptions{Name: cluster.UpdateClusterStatusActivityName})
+
+		deleteUnusedClusterSecretsActivity := intClusterWorkflow.MakeDeleteUnusedClusterSecretsActivity(secret.Store)
+		activity.RegisterWithOptions(deleteUnusedClusterSecretsActivity.Execute, activity.RegisterOptions{Name: intClusterWorkflow.DeleteUnusedClusterSecretsActivityName})
+
+		workflow.RegisterWithOptions(intClusterWorkflow.DeleteK8sResourcesWorkflow, workflow.RegisterOptions{Name: intClusterWorkflow.DeleteK8sResourcesWorkflowName})
+
+		k8sConfigGetter := intSecret.MakeKubeSecretStore(secret.Store)
+
+		deleteHelmDeploymentsActivity := intClusterWorkflow.MakeDeleteHelmDeploymentsActivity(k8sConfigGetter, conf.Logger())
+		activity.RegisterWithOptions(deleteHelmDeploymentsActivity.Execute, activity.RegisterOptions{Name: intClusterWorkflow.DeleteHelmDeploymentsActivityName})
+
+		deleteUserNamespacesActivity := intClusterWorkflow.MakeDeleteUserNamespacesActivity(intClusterK8s.MakeUserNamespaceDeleter(conf.Logger()), k8sConfigGetter)
+		activity.RegisterWithOptions(deleteUserNamespacesActivity.Execute, activity.RegisterOptions{Name: intClusterWorkflow.DeleteUserNamespacesActivityName})
+
+		deleteNamespaceResourcesActivity := intClusterWorkflow.MakeDeleteNamespaceResourcesActivity(intClusterK8s.MakeNamespaceResourcesDeleter(conf.Logger()), k8sConfigGetter)
+		activity.RegisterWithOptions(deleteNamespaceResourcesActivity.Execute, activity.RegisterOptions{Name: intClusterWorkflow.DeleteNamespaceResourcesActivityName})
+
+		deleteNamespaceServicesActivity := intClusterWorkflow.MakeDeleteNamespaceServicesActivity(intClusterK8s.MakeNamespaceServicesDeleter(conf.Logger()), k8sConfigGetter)
+		activity.RegisterWithOptions(deleteNamespaceServicesActivity.Execute, activity.RegisterOptions{Name: intClusterWorkflow.DeleteNamespaceServicesActivityName})
+
+		clusterDNSRecordsDeleter, err := intClusterDNS.MakeDefaultRecordsDeleter()
+		emperror.Panic(emperror.Wrap(err, "failed to create default cluster DNS records deleter"))
+
+		deleteClusterDNSRecordsActivity := intClusterWorkflow.MakeDeleteClusterDNSRecordsActivity(clusterDNSRecordsDeleter)
+		activity.RegisterWithOptions(deleteClusterDNSRecordsActivity.Execute, activity.RegisterOptions{Name: intClusterWorkflow.DeleteClusterDNSRecordsActivityName})
 
 		var closeCh = make(chan struct{})
 

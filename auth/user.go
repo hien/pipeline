@@ -30,7 +30,6 @@ import (
 	"github.com/goph/emperror"
 	"github.com/jinzhu/copier"
 	"github.com/jinzhu/gorm"
-	_ "github.com/jinzhu/gorm/dialects/mysql" // blank import is used here for sql driver inclusion
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/qor/auth"
@@ -536,6 +535,10 @@ func GetUserByLoginName(login string) (*User, error) {
 
 // GetUserNickNameById returns user's login name
 func GetUserNickNameById(userId uint) (userName string) {
+	if userId == 0 {
+		return
+	}
+
 	if user, err := GetUserById(userId); err != nil {
 		log.Warnf("Error during getting user name: %s", err.Error())
 	} else {

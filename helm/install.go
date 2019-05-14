@@ -23,12 +23,12 @@ import (
 
 	"github.com/banzaicloud/pipeline/config"
 	"github.com/banzaicloud/pipeline/internal/backoff"
-	pkgCommon "github.com/banzaicloud/pipeline/pkg/common"
 	phelm "github.com/banzaicloud/pipeline/pkg/helm"
 	"github.com/banzaicloud/pipeline/pkg/k8sclient"
 	"github.com/banzaicloud/pipeline/pkg/k8sutil"
 	"github.com/goph/emperror"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	apiv1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/rbac/v1"
@@ -43,7 +43,7 @@ import (
 )
 
 //PreInstall create's serviceAccount and AccountRoleBinding
-func PreInstall(helmInstall *phelm.Install, kubeConfig []byte) error {
+func PreInstall(log logrus.FieldLogger, helmInstall *phelm.Install, kubeConfig []byte) error {
 	log.Info("start pre-install")
 
 	var backoffConfig = backoff.ConstantBackoffConfig{
@@ -160,12 +160,12 @@ func PreInstall(helmInstall *phelm.Install, kubeConfig []byte) error {
 // RetryHelmInstall retries for a configurable time/interval
 // Azure AKS sometimes failing because of TLS handshake timeout, there are several issues on GitHub about that:
 // https://github.com/Azure/AKS/issues/112, https://github.com/Azure/AKS/issues/116, https://github.com/Azure/AKS/issues/14
-func RetryHelmInstall(helmInstall *phelm.Install, kubeconfig []byte) error {
+func RetryHelmInstall(log logrus.FieldLogger, helmInstall *phelm.Install, kubeconfig []byte) error {
 	retryAttempts := viper.GetInt(phelm.HELM_RETRY_ATTEMPT_CONFIG)
 	retrySleepSeconds := viper.GetInt(phelm.HELM_RETRY_SLEEP_SECONDS)
 	for i := 0; i <= retryAttempts; i++ {
 		log.Infof("Waiting %d/%d", i, retryAttempts)
-		err := Install(helmInstall, kubeconfig)
+		err := Install(log, helmInstall, kubeconfig)
 		if err != nil {
 			if strings.Contains(err.Error(), "net/http: TLS handshake timeout") {
 				time.Sleep(time.Duration(retrySleepSeconds) * time.Second)
@@ -305,9 +305,9 @@ func InstallLocalHelm(env helmEnv.EnvSettings) error {
 }
 
 // Install uses Kubernetes client to install Tiller.
-func Install(helmInstall *phelm.Install, kubeConfig []byte) error {
+func Install(log logrus.FieldLogger, helmInstall *phelm.Install, kubeConfig []byte) error {
 
-	err := PreInstall(helmInstall, kubeConfig)
+	err := PreInstall(log, helmInstall, kubeConfig)
 	if err != nil {
 		return err
 	}
@@ -321,14 +321,44 @@ func Install(helmInstall *phelm.Install, kubeConfig []byte) error {
 		AutoMountServiceAccountToken: true,
 	}
 
-	if len(helmInstall.TargetNodePool) > 0 {
-		opts.Values = []string{
-			fmt.Sprintf("spec.template.spec.tolerations[0].key=%v", pkgCommon.HeadNodeTaintKey),
-			"spec.template.spec.tolerations[0].operator=Equal",
-			fmt.Sprintf("spec.template.spec.tolerations[0].value=%v", helmInstall.TargetNodePool),
+	for i := range helmInstall.Tolerations {
+		if helmInstall.Tolerations[i].Key != "" {
+			opts.Values = append(opts.Values, fmt.Sprintf("spec.template.spec.tolerations[%d].key=%s", i, helmInstall.Tolerations[i].Key))
 		}
-		// TODO check why this even needed? Soft affinity would be better here.
-		//opts.NodeSelectors = fmt.Sprintf("%s=%s", pkgCommon.LabelKey, helmInstall.TargetNodePool)
+
+		if helmInstall.Tolerations[i].Operator != "" {
+			opts.Values = append(opts.Values, fmt.Sprintf("spec.template.spec.tolerations[%d].operator=%s", i, helmInstall.Tolerations[i].Operator))
+		}
+
+		if helmInstall.Tolerations[i].Value != "" {
+			opts.Values = append(opts.Values, fmt.Sprintf("spec.template.spec.tolerations[%d].value=%s", i, helmInstall.Tolerations[i].Value))
+		}
+
+		if helmInstall.Tolerations[i].Effect != "" {
+			opts.Values = append(opts.Values, fmt.Sprintf("spec.template.spec.tolerations[%d].effect=%s", i, helmInstall.Tolerations[i].Effect))
+		}
+	}
+
+	if helmInstall.NodeAffinity != nil {
+		for i := range helmInstall.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+			preferredSchedulingTerm := helmInstall.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution[i]
+
+			schedulingTermString := fmt.Sprintf("spec.template.spec.affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[%d]", i)
+			opts.Values = append(opts.Values, fmt.Sprintf("%s.weight=%d", schedulingTermString, preferredSchedulingTerm.Weight))
+
+			for j := range preferredSchedulingTerm.Preference.MatchExpressions {
+				matchExpression := preferredSchedulingTerm.Preference.MatchExpressions[j]
+
+				matchExpressionString := fmt.Sprintf("%s.preference.matchExpressions[%d]", schedulingTermString, j)
+
+				opts.Values = append(opts.Values, fmt.Sprintf("%s.key=%s", matchExpressionString, matchExpression.Key))
+				opts.Values = append(opts.Values, fmt.Sprintf("%s.operator=%s", matchExpressionString, matchExpression.Operator))
+
+				for k := range matchExpression.Values {
+					opts.Values = append(opts.Values, fmt.Sprintf("%s.values[%d]=%v", matchExpressionString, k, matchExpression.Values[i]))
+				}
+			}
+		}
 	}
 
 	kubeClient, err := k8sclient.NewClientFromKubeConfig(kubeConfig)
@@ -344,7 +374,6 @@ func Install(helmInstall *phelm.Install, kubeConfig []byte) error {
 			if err := installer.Upgrade(kubeClient, &opts); err != nil {
 				return errors.Wrap(err, "error when upgrading")
 			}
-
 			log.Info("Tiller (the Helm server-side component) has been upgraded to the current version.")
 		} else {
 			log.Info("Warning: Tiller is already installed in the cluster.")

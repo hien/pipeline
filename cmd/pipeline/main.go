@@ -23,8 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jinzhu/gorm"
-
 	evbus "github.com/asaskevich/EventBus"
 	ginprometheus "github.com/banzaicloud/go-gin-prometheus"
 	"github.com/banzaicloud/pipeline/api"
@@ -41,6 +39,7 @@ import (
 	"github.com/banzaicloud/pipeline/cluster"
 	"github.com/banzaicloud/pipeline/config"
 	"github.com/banzaicloud/pipeline/dns"
+	arkClusterManager "github.com/banzaicloud/pipeline/internal/ark/clustermanager"
 	arkEvents "github.com/banzaicloud/pipeline/internal/ark/events"
 	arkSync "github.com/banzaicloud/pipeline/internal/ark/sync"
 	"github.com/banzaicloud/pipeline/internal/audit"
@@ -49,6 +48,7 @@ import (
 	intClusterAuth "github.com/banzaicloud/pipeline/internal/cluster/auth"
 	"github.com/banzaicloud/pipeline/internal/cluster/clustersecret"
 	"github.com/banzaicloud/pipeline/internal/cluster/clustersecret/clustersecretadapter"
+	prometheusMetrics "github.com/banzaicloud/pipeline/internal/cluster/metrics/adapters/prometheus"
 	"github.com/banzaicloud/pipeline/internal/dashboard"
 	"github.com/banzaicloud/pipeline/internal/monitor"
 	"github.com/banzaicloud/pipeline/internal/notification"
@@ -56,6 +56,9 @@ import (
 	"github.com/banzaicloud/pipeline/internal/platform/gin/correlationid"
 	ginlog "github.com/banzaicloud/pipeline/internal/platform/gin/log"
 	platformlog "github.com/banzaicloud/pipeline/internal/platform/log"
+	azurePKEAdapter "github.com/banzaicloud/pipeline/internal/providers/azure/pke/adapter"
+	azurePKEDriver "github.com/banzaicloud/pipeline/internal/providers/azure/pke/driver"
+	anchore "github.com/banzaicloud/pipeline/internal/security"
 	"github.com/banzaicloud/pipeline/model/defaults"
 	"github.com/banzaicloud/pipeline/pkg/k8sclient"
 	"github.com/banzaicloud/pipeline/pkg/providers"
@@ -65,6 +68,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/goph/emperror"
+	"github.com/jinzhu/gorm"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -151,13 +155,7 @@ func main() {
 	clusterEvents := cluster.NewClusterEvents(clusterEventBus)
 	clusters := intCluster.NewClusters(db)
 	secretValidator := providers.NewSecretValidator(secret.Store)
-	statusChangeDurationMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Namespace: "pipeline",
-		Name:      "cluster_status_change_duration",
-		Help:      "Cluster status change duration in seconds",
-	},
-		[]string{"provider", "location", "status", "orgName", "clusterName"},
-	)
+	statusChangeDurationMetric := prometheusMetrics.MakePrometheusClusterStatusChangeDurationMetric()
 	// Initialise cluster total metric
 	clusterTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "pipeline",
@@ -238,7 +236,28 @@ func main() {
 		go monitor.NewSpotMetricsExporter(context.Background(), clusterManager, log.WithField("subsystem", "spot-metrics-exporter")).Run(viper.GetDuration(config.SpotMetricsCollectionInterval))
 	}
 
-	clusterAPI := api.NewClusterAPI(clusterManager, clusterGetter, workflowClient, log, errorHandler, externalBaseURL)
+	clusterCreators := api.ClusterCreators{
+		PKEOnAzure: azurePKEDriver.MakeAzurePKEClusterCreator(
+			log,
+			azurePKEAdapter.NewGORMAzurePKEClusterStore(db),
+			workflowClient,
+			externalBaseURL,
+		),
+	}
+	clusterDeleters := api.ClusterDeleters{
+		PKEOnAzure: azurePKEDriver.MakeAzurePKEClusterDeleter(
+			clusterEvents,
+			clusterManager.GetKubeProxyCache(),
+			log,
+			secret.Store,
+			statusChangeDurationMetric,
+			azurePKEAdapter.NewGORMAzurePKEClusterStore(db),
+			workflowClient,
+		),
+	}
+	clusterAPI := api.NewClusterAPI(clusterManager, clusterGetter, workflowClient, log, errorHandler, externalBaseURL, clusterCreators, clusterDeleters)
+
+	nplsApi := api.NewNodepoolManagerAPI(clusterGetter, log, errorHandler)
 
 	//Initialise Gin router
 	router := gin.New()
@@ -356,7 +375,7 @@ func main() {
 			orgs.GET("/:orgid/spotguides/:owner/:name/icon", spotguideAPI.GetSpotguideIcon)
 
 			orgs.GET("/:orgid/domain", domainAPI.GetDomain)
-			orgs.POST("/:orgid/clusters", clusterAPI.CreateClusterRequest)
+			orgs.POST("/:orgid/clusters", clusterAPI.CreateCluster)
 			//v1.GET("/status", api.Status)
 			orgs.GET("/:orgid/clusters", clusterAPI.GetClusters)
 			orgs.GET("/:orgid/clusters/:id", clusterAPI.GetCluster)
@@ -389,29 +408,30 @@ func main() {
 			orgs.HEAD("/:orgid/clusters/:id/deployments/:name", api.HelmDeploymentStatus)
 			orgs.POST("/:orgid/clusters/:id/helminit", api.InitHelmOnCluster)
 
-			orgs.GET("/:orgid/clusters/:id/scanlog", api.GetScanLog)
-			orgs.GET("/:orgid/clusters/:id/scanlog/:releaseName", api.GetScanLog)
-			orgs.GET("/:orgid/clusters/:id/whitelists", api.GetWhiteLists)
-			orgs.POST("/:orgid/clusters/:id/whitelists", api.CreateWhiteList)
-			orgs.DELETE("/:orgid/clusters/:id/whitelists/:name", api.DeleteWhiteList)
-			orgs.GET("/:orgid/clusters/:id/policies", api.GetPolicies)
-			orgs.GET("/:orgid/clusters/:id/policies/:policyId", api.GetPolicies)
-			orgs.POST("/:orgid/clusters/:id/policies", api.CreatePolicy)
-			orgs.PUT("/:orgid/clusters/:id/policies/:policyId", api.UpdatePolicies)
-			orgs.DELETE("/:orgid/clusters/:id/policies/:policyId", api.DeletePolicy)
-
 			orgs.GET("/:orgid/clusters/:id/images", api.ListImages)
 			orgs.GET("/:orgid/clusters/:id/images/:imageDigest/deployments", api.GetImageDeployments)
 			orgs.GET("/:orgid/clusters/:id/deployments/:name/images", api.GetDeploymentImages)
 
-			orgs.POST("/:orgid/clusters/:id/imagescan", api.ScanImages)
-			orgs.GET("/:orgid/clusters/:id/imagescan/:imagedigest", api.GetScanResult)
-			orgs.GET("/:orgid/clusters/:id/imagescan/:imagedigest/vuln", api.GetImageVulnerabilities)
+			if anchore.AnchoreEnabled {
+				orgs.GET("/:orgid/clusters/:id/scanlog", api.GetScanLog)
+				orgs.GET("/:orgid/clusters/:id/scanlog/:releaseName", api.GetScanLog)
+				orgs.GET("/:orgid/clusters/:id/whitelists", api.GetWhiteLists)
+				orgs.POST("/:orgid/clusters/:id/whitelists", api.CreateWhiteList)
+				orgs.DELETE("/:orgid/clusters/:id/whitelists/:name", api.DeleteWhiteList)
+				orgs.GET("/:orgid/clusters/:id/policies", api.GetPolicies)
+				orgs.GET("/:orgid/clusters/:id/policies/:policyId", api.GetPolicies)
+				orgs.POST("/:orgid/clusters/:id/policies", api.CreatePolicy)
+				orgs.PUT("/:orgid/clusters/:id/policies/:policyId", api.UpdatePolicies)
+				orgs.DELETE("/:orgid/clusters/:id/policies/:policyId", api.DeletePolicy)
 
+				orgs.POST("/:orgid/clusters/:id/imagescan", api.ScanImages)
+				orgs.GET("/:orgid/clusters/:id/imagescan/:imagedigest", api.GetScanResult)
+				orgs.GET("/:orgid/clusters/:id/imagescan/:imagedigest/vuln", api.GetImageVulnerabilities)
+			}
 			clusters := orgs.Group("/:orgid/clusters/:id")
 
-			clusters.GET("/nodepools/labels", api.GetNodepoolLabelSets)
-			clusters.POST("/nodepools/labels", api.SetNodepoolLabelSets)
+			clusters.GET("/nodepools/labels", nplsApi.GetNodepoolLabelSets)
+			clusters.POST("/nodepools/labels", nplsApi.SetNodepoolLabelSets)
 
 			namespaceAPI := namespace.NewAPI(clusterGetter, errorHandler)
 			namespaceAPI.RegisterRoutes(clusters.Group("/namespaces/:namespace"))
@@ -508,15 +528,15 @@ func main() {
 		restores.AddRoutes(orgs.Group("/:orgid/clusters/:id/restores"))
 		schedules.AddRoutes(orgs.Group("/:orgid/clusters/:id/schedules"))
 		buckets.AddRoutes(orgs.Group("/:orgid/backupbuckets"))
-		backups.AddOrgRoutes(orgs.Group("/:orgid/backups"))
+		backups.AddOrgRoutes(orgs.Group("/:orgid/backups"), clusterManager)
 	}
 
+	arkEvents.NewClusterEventHandler(arkEvents.NewClusterEvents(clusterEventBus), config.DB(), logger)
 	if viper.GetBool(config.ARKSyncEnabled) {
-		arkEvents.NewClusterEventHandler(arkEvents.NewClusterEvents(clusterEventBus), config.DB(), logger)
 		go arkSync.RunSyncServices(
 			context.Background(),
 			config.DB(),
-			clusterManager,
+			arkClusterManager.New(clusterManager),
 			platformlog.NewLogger(platformlog.Config{
 				Level:  viper.GetString(config.ARKLogLevel),
 				Format: viper.GetString(config.LoggingLogFormat),

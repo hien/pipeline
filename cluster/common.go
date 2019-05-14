@@ -25,6 +25,8 @@ import (
 	"github.com/banzaicloud/pipeline/config"
 	"github.com/banzaicloud/pipeline/internal/cluster"
 	"github.com/banzaicloud/pipeline/internal/platform/database"
+	"github.com/banzaicloud/pipeline/internal/providers/azure/pke/adapter"
+	pkeAzureAdapter "github.com/banzaicloud/pipeline/internal/providers/azure/pke/driver/commoncluster"
 	"github.com/banzaicloud/pipeline/model"
 	pkgCluster "github.com/banzaicloud/pipeline/pkg/cluster"
 	pkgCommon "github.com/banzaicloud/pipeline/pkg/common"
@@ -35,6 +37,7 @@ import (
 	"github.com/banzaicloud/pipeline/utils"
 	"github.com/goph/emperror"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 // CommonCluster interface for clusters.
@@ -265,26 +268,28 @@ func GetCommonClusterFromModel(modelCluster *model.ClusterModel) (CommonCluster,
 
 	db := config.DB()
 
-	cloudType := modelCluster.Cloud
-
-	if modelCluster.Distribution == pkgCluster.PKE {
+	if modelCluster.Distribution == pkgCluster.PKE && modelCluster.Cloud == pkgCluster.Azure {
+		logrus.Debugf("azure adapter stuff")
+		return pkeAzureAdapter.MakeCommonClusterGetter(secret.Store, adapter.NewGORMAzurePKEClusterStore(db)).GetByID(modelCluster.ID)
+	} else if modelCluster.Distribution == pkgCluster.PKE {
 		return createCommonClusterWithDistributionFromModel(modelCluster)
 	}
 
-	switch cloudType {
+	switch modelCluster.Cloud {
 	case pkgCluster.Alibaba:
 		//Create Alibaba struct
-		alibabaCluster, err := CreateACSKClusterFromModel(modelCluster)
+
+		alibabaCluster, err := CreateACKClusterFromModel(modelCluster)
 		if err != nil {
 			return nil, err
 		}
 
-		err = db.Where(model.ACSKClusterModel{ID: alibabaCluster.modelCluster.ID}).First(&alibabaCluster.modelCluster.ACSK).Error
+		err = db.Where(model.ACKClusterModel{ID: alibabaCluster.modelCluster.ID}).First(&alibabaCluster.modelCluster.ACK).Error
 		if err != nil {
 			return nil, err
 		}
 
-		err = db.Model(&alibabaCluster.modelCluster.ACSK).Related(&alibabaCluster.modelCluster.ACSK.NodePools, "NodePools").Error
+		err = db.Model(&alibabaCluster.modelCluster.ACK).Related(&alibabaCluster.modelCluster.ACK.NodePools, "NodePools").Error
 		if err != nil {
 			return nil, err
 		}
@@ -378,7 +383,7 @@ func CreateCommonClusterFromRequest(createClusterRequest *pkgCluster.CreateClust
 	switch cloudType {
 	case pkgCluster.Alibaba:
 		//Create Alibaba struct
-		alibabaCluster, err := CreateACSKClusterFromRequest(createClusterRequest, orgId, userId)
+		alibabaCluster, err := CreateACKClusterFromRequest(createClusterRequest, orgId, userId)
 		if err != nil {
 			return nil, err
 		}
@@ -486,7 +491,7 @@ func getNodePoolsFromUpdateRequest(updateRequest *pkgCluster.UpdateClusterReques
 
 	switch cloudType {
 	case pkgCluster.Alibaba:
-		for name, np := range updateRequest.ACSK.NodePools {
+		for name, np := range updateRequest.ACK.NodePools {
 			if np != nil {
 				nodePools[name] = &pkgCluster.NodePoolStatus{
 					InstanceType: np.InstanceType,
@@ -554,15 +559,6 @@ func getNodePoolsFromUpdateRequest(updateRequest *pkgCluster.UpdateClusterReques
 	}
 
 	return nodePools
-}
-
-// CleanStateStore deletes state store folder by cluster name
-func CleanStateStore(path string) error {
-	if len(path) != 0 {
-		stateStorePath := config.GetStateStorePath(path)
-		return os.RemoveAll(stateStorePath)
-	}
-	return pkgErrors.ErrStateStorePathEmpty
 }
 
 // CleanHelmFolder deletes helm path

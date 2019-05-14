@@ -33,7 +33,7 @@ const (
 type GKEClusterModel struct {
 	ID        uint                 `gorm:"primary_key"`
 	Cluster   cluster.ClusterModel `gorm:"foreignkey:ClusterID"`
-	ClusterID uint
+	ClusterID uint                 `gorm:"unique_index:idx_gke_cluster_id"`
 
 	MasterVersion string
 	NodeVersion   string
@@ -108,11 +108,11 @@ type GKENodePoolModel struct {
 	CreatedAt time.Time
 	CreatedBy uint
 
-	ClusterID uint `gorm:"unique_index:idx_cluster_id_name"`
+	ClusterID uint   `gorm:"unique_index:idx_gke_np_cluster_id_name"`
+	Name      string `gorm:"unique_index:idx_gke_np_cluster_id_name"`
 
-	Name             string `gorm:"unique_index:idx_cluster_id_name"`
-	Autoscaling      bool   `gorm:"default:false"`
-	Preemptible      bool   `gorm:"default:false"`
+	Autoscaling      bool `gorm:"default:false"`
+	Preemptible      bool `gorm:"default:false"`
 	NodeMinCount     int
 	NodeMaxCount     int
 	NodeCount        int
@@ -154,9 +154,9 @@ func (m GKENodePoolModel) String() string {
 // GKENodePoolLabelModel stores labels for node pools
 type GKENodePoolLabelModel struct {
 	ID         uint   `gorm:"primary_key"`
-	Name       string `gorm:"unique_index:idx_node_pool_id_name"`
+	Name       string `gorm:"unique_index:idx_gke_node_pool_labels_id_name"`
 	Value      string
-	NodePoolID uint `gorm:"unique_index:idx_node_pool_id_name"`
+	NodePoolID uint `gorm:"unique_index:idx_gke_node_pool_labels_id_name"`
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }

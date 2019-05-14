@@ -15,6 +15,9 @@
 package cluster
 
 import (
+	"fmt"
+
+	"github.com/banzaicloud/pipeline/internal/providers/azure/pke"
 	"github.com/ghodss/yaml"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
@@ -35,6 +38,7 @@ const cloudProviderAws = "aws"
 const autoScalerChart = "banzaicloud-stable/cluster-autoscaler"
 const expanderStrategy = "least-waste"
 const logLevel = "5"
+const AzureVirtualMachineScaleSet = "vmss"
 
 const releaseName = "autoscaler"
 
@@ -61,6 +65,7 @@ type azureInfo struct {
 	ResourceGroup     string `json:"resourceGroup"`
 	NodeResourceGroup string `json:"nodeResourceGroup"`
 	ClusterName       string `json:"clusterName"`
+	VMType            string `json:"vmType,omitempty"`
 }
 
 type autoDiscovery struct {
@@ -76,6 +81,7 @@ type autoscalingInfo struct {
 	Azure             azureInfo         `json:"azure"`
 	AutoDiscovery     autoDiscovery     `json:"autoDiscovery"`
 	SslCertPath       *string           `json:"sslCertPath,omitempty"`
+	SslCertHostPath   *string           `json:"sslCertHostPath,omitempty"`
 	Affinity          v1.Affinity       `json:"affinity,omitempty"`
 	Tolerations       []v1.Toleration   `json:"tolerations,omitempty"`
 }
@@ -127,19 +133,42 @@ func getAmazonNodeGroups(cluster CommonCluster) ([]nodeGroup, error) {
 func getAzureNodeGroups(cluster CommonCluster) ([]nodeGroup, error) {
 	var nodeGroups []nodeGroup
 
-	nodePools, err := GetAKSNodePools(cluster)
-	if err != nil {
-		return nil, err
-	}
-	for _, nodePool := range nodePools {
-		if nodePool.Autoscaling {
-			nodeGroups = append(nodeGroups, nodeGroup{
-				Name:    nodePool.Name,
-				MinSize: nodePool.NodeMinCount,
-				MaxSize: nodePool.NodeMaxCount,
-			})
+	switch cluster.GetDistribution() {
+	case pkgCluster.AKS:
+		nodePools, err := GetAKSNodePools(cluster)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, nodePool := range nodePools {
+			if nodePool.Autoscaling {
+				nodeGroups = append(nodeGroups, nodeGroup{
+					Name:    nodePool.Name,
+					MinSize: nodePool.NodeMinCount,
+					MaxSize: nodePool.NodeMaxCount,
+				})
+			}
+		}
+	case pkgCluster.PKE:
+		i, ok := cluster.(interface {
+			GetPKEOnAzureCluster() pke.PKEOnAzureCluster
+		})
+		if !ok {
+			return nil, errors.New("Azure/PKE cluster does not implement method GetPKEOnAzureCluster")
+		}
+
+		cl := i.GetPKEOnAzureCluster()
+		for _, nodePool := range cl.NodePools {
+			if nodePool.Autoscaling {
+				nodeGroups = append(nodeGroups, nodeGroup{
+					Name:    pke.GetVMSSName(cl.Name, nodePool.Name),
+					MinSize: int(nodePool.Min),
+					MaxSize: int(nodePool.Max),
+				})
+			}
 		}
 	}
+
 	return nodeGroups, nil
 }
 
@@ -191,24 +220,13 @@ func getNodeResourceGroup(cluster CommonCluster) *string {
 	return nil
 }
 
-func createAutoscalingForAzure(cluster CommonCluster, groups []nodeGroup) *autoscalingInfo {
+func createAutoscalingForAzure(cluster CommonCluster, groups []nodeGroup, vmType string) *autoscalingInfo {
 	clusterSecret, err := cluster.GetSecretWithValidation()
 	if err != nil {
 		return nil
 	}
 
-	nodeResourceGroup := getNodeResourceGroup(cluster)
-	if nodeResourceGroup == nil {
-		log.Errorf("Error nodeResourceGroup not found")
-		return nil
-	}
-
-	resourceGroup, err := GetAKSResourceGroup(cluster)
-	if err != nil {
-		log.Errorf("could not get resource group: %s", err.Error())
-	}
-
-	return &autoscalingInfo{
+	autoscalingInfo := &autoscalingInfo{
 		CloudProvider:     cloudProviderAzure,
 		AutoscalingGroups: groups,
 		ExtraArgs: map[string]string{
@@ -217,17 +235,48 @@ func createAutoscalingForAzure(cluster CommonCluster, groups []nodeGroup) *autos
 		},
 		Rbac: rbac{Create: true},
 		Azure: azureInfo{
-			ClientID:          clusterSecret.Values[pkgSecret.AzureClientID],
-			ClientSecret:      clusterSecret.Values[pkgSecret.AzureClientSecret],
-			SubscriptionID:    clusterSecret.Values[pkgSecret.AzureSubscriptionID],
-			TenantID:          clusterSecret.Values[pkgSecret.AzureTenantID],
-			ResourceGroup:     resourceGroup,
-			NodeResourceGroup: *nodeResourceGroup,
-			ClusterName:       cluster.GetName(),
+			ClientID:       clusterSecret.Values[pkgSecret.AzureClientID],
+			ClientSecret:   clusterSecret.Values[pkgSecret.AzureClientSecret],
+			SubscriptionID: clusterSecret.Values[pkgSecret.AzureSubscriptionID],
+			TenantID:       clusterSecret.Values[pkgSecret.AzureTenantID],
+			ClusterName:    cluster.GetName(),
 		},
 		Affinity:    getHeadNodeAffinity(cluster),
 		Tolerations: getHeadNodeTolerations(),
 	}
+
+	switch cluster.GetDistribution() {
+	case pkgCluster.AKS:
+		nodeResourceGroup := getNodeResourceGroup(cluster)
+		if nodeResourceGroup == nil {
+			log.Errorf("Error nodeResourceGroup not found")
+			return nil
+		}
+
+		resourceGroup, err := GetAKSResourceGroup(cluster)
+		if err != nil {
+			log.Errorf("could not get resource group: %s", err.Error())
+		}
+
+		autoscalingInfo.Azure.ResourceGroup = resourceGroup
+		autoscalingInfo.Azure.NodeResourceGroup = *nodeResourceGroup
+
+	case pkgCluster.PKE:
+		i, ok := cluster.(interface {
+			GetResourceGroupName() string
+		})
+		if !ok {
+			return nil
+		}
+		autoscalingInfo.Azure.ResourceGroup = i.GetResourceGroupName()
+		if len(vmType) > 0 {
+			autoscalingInfo.Azure.VMType = vmType
+		}
+		sslCertHostPath := "/etc/kubernetes/pki/ca.crt"
+		autoscalingInfo.SslCertHostPath = &sslCertHostPath
+	}
+
+	return autoscalingInfo
 }
 
 //DeployClusterAutoscaler post hook only for AWS & EKS & Azure for now
@@ -303,12 +352,24 @@ func isAutoscalerDeployedAlready(releaseName string, kubeConfig []byte) bool {
 func deployAutoscalerChart(cluster CommonCluster, nodeGroups []nodeGroup, kubeConfig []byte, action deploymentAction) error {
 	var values *autoscalingInfo
 	switch cluster.GetDistribution() {
-	case pkgCluster.EKS, pkgCluster.PKE:
+	case pkgCluster.EKS:
 		values = createAutoscalingForEks(cluster, nodeGroups)
 	case pkgCluster.AKS:
-		values = createAutoscalingForAzure(cluster, nodeGroups)
+		values = createAutoscalingForAzure(cluster, nodeGroups, "")
+	case pkgCluster.PKE:
+		switch cluster.GetCloud() {
+		case pkgCluster.Amazon:
+			values = createAutoscalingForEks(cluster, nodeGroups)
+		case pkgCluster.Azure:
+			values = createAutoscalingForAzure(cluster, nodeGroups, AzureVirtualMachineScaleSet)
+		}
 	default:
 		return nil
+	}
+	if values == nil {
+		err := errors.New(fmt.Sprintf("Cluster autoscaler configuration error on %s %s", cluster.GetCloud(), cluster.GetDistribution()))
+		log.Errorf(err.Error())
+		return err
 	}
 	yamlValues, err := yaml.Marshal(*values)
 	if err != nil {
